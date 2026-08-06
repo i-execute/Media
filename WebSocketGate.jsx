@@ -57,3 +57,10 @@ function App() {
 }
 
 window.App = App;
+
+// This file is loaded directly by the generated proxy page.
+// Render here as well, so opening the public HTTPS URL works without relying
+// on the WebDeployer wrapper to call ReactDOM.createRoot().
+if (window.ReactDOM && document.getElementById("root")) {
+  ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+}
