@@ -1,43 +1,54 @@
 #!/usr/bin/env python3
-import socket
-import os
-import json
+
+# Flags: --color (force ANSI), --no-color (disable). By default colors are on
+# only when stdout is a terminal, so userbot/pipe output stays clean.
+
 import base64
+import json
+import os
+import socket
 import struct
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 
 SOCK = os.path.expanduser("~/.codex/app-server-control/app-server-control.sock")
 
-USE_COLOR = sys.stdout.isatty()
-
-if USE_COLOR:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    RED = "\033[31m"
-    CYAN = "\033[36m"
-else:
-    RESET = BOLD = DIM = GREEN = YELLOW = RED = CYAN = ""
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
 
 
-def ws_frame(data):
+def use_color():
+    if "--no-color" in sys.argv or os.environ.get("NO_COLOR"):
+        return False
+    if "--color" in sys.argv:
+        return True
+    return sys.stdout.isatty()
+
+
+COLOR = use_color()
+
+
+def paint(code, text):
+    return f"{code}{text}{RESET}" if COLOR else str(text)
+
+def ws_frame(data, opcode=0x1):
     data = data.encode() if isinstance(data, str) else data
     mask = os.urandom(4)
     n = len(data)
 
     if n < 126:
-        head = bytes([0x81, 0x80 | n])
+        head = bytes([0x80 | opcode, 0x80 | n])
     elif n < 65536:
-        head = bytes([0x81, 0x80 | 126]) + struct.pack("!H", n)
+        head = bytes([0x80 | opcode, 0x80 | 126]) + struct.pack("!H", n)
     else:
-        head = bytes([0x81, 0x80 | 127]) + struct.pack("!Q", n)
+        head = bytes([0x80 | opcode, 0x80 | 127]) + struct.pack("!Q", n)
 
-    return head + mask + bytes(
-        b ^ mask[i % 4] for i, b in enumerate(data)
-    )
+    return head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data))
 
 
 def recv_exact(sock, n):
@@ -65,9 +76,7 @@ def recv_frame(sock):
     data = recv_exact(sock, length)
 
     if mask:
-        data = bytes(
-            x ^ mask[i % 4] for i, x in enumerate(data)
-        )
+        data = bytes(x ^ mask[i % 4] for i, x in enumerate(data))
 
     return opcode, data
 
@@ -82,78 +91,22 @@ def recv_json(sock):
 
         if opcode == 0x1:
             return json.loads(data.decode())
-
         if opcode == 0x9:
-            n = len(data)
-            if n < 126:
-                sock.sendall(bytes([0x8A, n]) + data)
-
+            sock.sendall(ws_frame(data, 0xA))
         elif opcode == 0x8:
             raise RuntimeError("server closed websocket")
 
 
-def format_reset(timestamp):
-    if not timestamp:
-        return "—"
-
-    return datetime.fromtimestamp(timestamp).astimezone().strftime(
-        "%d.%m.%Y %H:%M:%S %Z"
-    )
-
-
-def format_window(minutes):
-    if not minutes:
-        return "—"
-
-    if minutes % 43200 == 0:
-        months = minutes // 43200
-        return f"{months} month" if months == 1 else f"{months} months"
-
-    if minutes % 10080 == 0:
-        weeks = minutes // 10080
-        return f"{weeks} week" if weeks == 1 else f"{weeks} weeks"
-
-    if minutes % 1440 == 0:
-        days = minutes // 1440
-        return f"{days} day" if days == 1 else f"{days} days"
-
-    if minutes % 60 == 0:
-        hours = minutes // 60
-        return f"{hours} hour" if hours == 1 else f"{hours} hours"
-
-    return f"{minutes} min"
+def rpc_wait(sock, req_id):
+    while True:
+        response = recv_json(sock)
+        if response.get("id") == req_id:
+            if "error" in response:
+                raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
+            return response.get("result", {})
 
 
-def progress_bar(percent, width=30):
-    percent = max(0, min(100, int(percent)))
-    filled = round(width * percent / 100)
-    empty = width - filled
-
-    if percent >= 90:
-        color = RED
-    elif percent >= 70:
-        color = YELLOW
-    else:
-        color = GREEN
-
-    return f"{color}{'█' * filled}{DIM}{'░' * empty}{RESET}"
-
-
-def print_window(title, window):
-    if not window:
-        return
-
-    used = int(window.get("usedPercent", 0))
-    remaining = max(0, 100 - used)
-
-    print(f"{BOLD}{title}{RESET}")
-    print(f"  {progress_bar(used)}  {BOLD}{used}%{RESET} used")
-    print(f"  Remaining: {GREEN}{remaining}%{RESET}")
-    print(f"  Window:    {format_window(window.get('windowDurationMins'))}")
-    print(f"  Resets:    {format_reset(window.get('resetsAt'))}")
-
-
-def main():
+def fetch_limits():
     if not os.path.exists(SOCK):
         raise RuntimeError(f"Codex control socket not found: {SOCK}")
 
@@ -162,18 +115,17 @@ def main():
     sock.connect(SOCK)
 
     key = base64.b64encode(os.urandom(16)).decode()
-
-    handshake = (
-        "GET / HTTP/1.1\r\n"
-        "Host: localhost\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "\r\n"
+    sock.sendall(
+        (
+            "GET / HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        ).encode()
     )
-
-    sock.sendall(handshake.encode())
 
     response = b""
     while b"\r\n\r\n" not in response:
@@ -183,109 +135,150 @@ def main():
         response += chunk
 
     status = response.split(b"\r\n", 1)[0]
-
-    if b" 101 " not in status and not status.endswith(b" 101"):
-        raise RuntimeError(
-            "WebSocket upgrade failed: " +
-            status.decode(errors="replace")
-        )
+    if b" 101" not in status:
+        raise RuntimeError("WebSocket upgrade failed: " + status.decode(errors="replace"))
 
     send_json(sock, {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "clientInfo": {
-                "name": "codex-limits",
-                "version": "1.0"
-            }
-        }
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"clientInfo": {"name": "codex-limits", "version": "2.0"}},
     })
+    rpc_wait(sock, 1)
 
-    while True:
-        response = recv_json(sock)
-
-        if response.get("id") == 1:
-            if "error" in response:
-                raise RuntimeError(
-                    json.dumps(response["error"], ensure_ascii=False)
-                )
-            break
-
+    send_json(sock, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
     send_json(sock, {
-        "jsonrpc": "2.0",
-        "method": "initialized",
-        "params": {}
+        "jsonrpc": "2.0", "id": 2,
+        "method": "account/rateLimits/read", "params": None,
     })
-
-    send_json(sock, {
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "account/rateLimits/read",
-        "params": None
-    })
-
-    while True:
-        response = recv_json(sock)
-
-        if response.get("id") == 2:
-            if "error" in response:
-                raise RuntimeError(
-                    json.dumps(response["error"], ensure_ascii=False)
-                )
-
-            result = response.get("result", {})
-            break
+    result = rpc_wait(sock, 2)
 
     sock.close()
+    return result
 
+def used_pct(window):
+    return int(round(window.get("usedPercent") or 0))
+
+
+def format_window(minutes):
+    if not minutes:
+        return "unknown"
+    for size, name in ((43200, "month"), (10080, "week"), (1440, "day"), (60, "hour")):
+        if minutes % size == 0:
+            n = minutes // size
+            return f"{n} {name}" if n == 1 else f"{n} {name}s"
+    return f"{minutes} min"
+
+
+def format_date(ts):
+    if not ts:
+        return "n/a"
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
+
+
+def format_delta(ts):
+    if not ts:
+        return "n/a"
+    left = int(ts - time.time())
+    if left <= 0:
+        return "now"
+    d, rem = divmod(left, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m"
+
+
+def level(pct):
+    """(color, systemd-like state) by usage percent."""
+    if pct >= 100:
+        return RED, "failed (Result: quota-exhausted)"
+    if pct >= 90:
+        return RED, "degraded (Result: quota-critical)"
+    if pct >= 70:
+        return YELLOW, "degraded (Result: quota-low)"
+    return GREEN, "active (running)"
+
+
+def pct_color(pct):
+    return level(pct)[0]
+
+
+def line(label, value):
+    return f"{label:>12} {value}"
+
+
+def render(result):
     limits = result.get("rateLimits") or {}
     plan = limits.get("planType", "unknown")
+    primary = limits.get("primary")
+    secondary = limits.get("secondary")
 
-    print()
-    print(f"{BOLD}{CYAN}Codex Usage{RESET}")
-    print(f"{DIM}{'─' * 42}{RESET}")
-    print(f"  Plan: {BOLD}{plan}{RESET}")
-    print()
+    items = [("primary", primary), ("secondary", secondary)]
+    wins = [w for w in (primary, secondary) if w]
 
-    print_window("Primary", limits.get("primary"))
+    for limit_id, bucket in (result.get("rateLimitsByLimitId") or {}).items():
+        if limit_id == limits.get("limitId"):
+            continue
+        for kind in ("primary", "secondary"):
+            if bucket.get(kind):
+                items.append((f"{limit_id}:{kind}", bucket[kind]))
+                wins.append(bucket[kind])
 
-    if limits.get("secondary"):
-        print()
-        print_window("Secondary", limits["secondary"])
+    worst = max((used_pct(w) for w in wins), default=0)
+    color, state = level(worst)
+
+    out = [
+        f"{paint(color, '●')} {paint(BOLD, 'codex-limits.service')} - Codex usage",
+        line("Loaded:", f"loaded (plan: {plan})"),
+        line("Active:", paint(color, state)),
+    ]
 
     credits = limits.get("credits")
-
     if credits:
         if credits.get("unlimited"):
-            print()
-            print(f"{BOLD}Credits{RESET}")
-            print(f"  Balance: {GREEN}unlimited{RESET}")
+            out.append(line("Credits:", paint(GREEN, "unlimited")))
         elif credits.get("balance") is not None:
-            print()
-            print(f"{BOLD}Credits{RESET}")
-            print(f"  Balance: {credits['balance']}")
+            out.append(line("Credits:", credits["balance"]))
 
-    buckets = result.get("rateLimitsByLimitId")
+    out.append(line("Tasks:", f"{len(wins)} (limit: {len(wins)})"))
 
-    if buckets:
-        for limit_id, bucket in buckets.items():
-            if limit_id == limits.get("limitId"):
-                continue
+    if primary:
+        used = used_pct(primary)
+        left = max(0, 100 - used)
+        out.append(line("Memory:", f"{paint(pct_color(used), f'{used}%')} of "
+                                    f"{format_window(primary.get('windowDurationMins'))} window"))
+        out.append(line("CPU:", f"{left}% left"))
+    else:
+        out.append(line("Memory:", "n/a"))
+        out.append(line("CPU:", "n/a"))
 
-            print()
-            print(f"{BOLD}Bucket: {limit_id}{RESET}")
+    out.append(line("CGroup:", "/codex.slice/codex-limits.service"))
 
-            if bucket.get("primary"):
-                print_window("Primary", bucket["primary"])
+    indent = " " * 13
+    width = max(10, max(len(n) for n, _ in items) + 1)
 
-            if bucket.get("secondary"):
-                print()
-                print_window("Secondary", bucket["secondary"])
+    for idx, (name, win) in enumerate(items):
+        last = idx == len(items) - 1
+        branch = "└─" if last else "├─"
+        cont = "   " if last else "│  "
 
-    print()
-    print(f"{DIM}{'─' * 42}{RESET}")
-    print()
+        if not win:
+            out.append(f"{indent}{branch} {name:<{width}}n/a")
+            continue
+
+        used = used_pct(win)
+        ts = win.get("resetsAt")
+        out.append(f"{indent}{branch} {name:<{width}}{paint(pct_color(used), f'{used}%')}")
+        out.append(f"{indent}{cont}{'resets':<{width}}{format_date(ts)}")
+        out.append(f"{indent}{cont}{'in':<{width}}{format_delta(ts)}")
+
+    return "\n".join(out)
+
+
+def main():
+    print(render(fetch_limits()))
 
 
 if __name__ == "__main__":
@@ -294,5 +287,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         raise SystemExit(130)
     except Exception as e:
-        print(f"{RED}codex-limits: ERROR:{RESET} {e}")
+        print(f"{paint(RED, 'codex-limits: ERROR:')} {e}")
         raise SystemExit(1)
