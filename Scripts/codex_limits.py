@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 
-# Codex limits in systemctl status style.
-# Flags: --color (force ANSI), --no-color (disable). By default colors are on
-# only when stdout is a terminal, so userbot/pipe output stays clean.
-
 import base64
 import json
 import os
@@ -36,6 +32,7 @@ COLOR = use_color()
 
 def paint(code, text):
     return f"{code}{text}{RESET}" if COLOR else str(text)
+
 
 def ws_frame(data, opcode=0x1):
     data = data.encode() if isinstance(data, str) else data
@@ -154,6 +151,7 @@ def fetch_limits():
 
     sock.close()
     return result
+
 
 def used_pct(window):
     return int(round(window.get("usedPercent") or 0))
