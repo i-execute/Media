@@ -4,19 +4,23 @@ import os
 import json
 import base64
 import struct
+import sys
 from datetime import datetime
 
 SOCK = os.path.expanduser("~/.codex/app-server-control/app-server-control.sock")
 
-# ANSI colors
-RESET = "\033[0m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-RED = "\033[31m"
-CYAN = "\033[36m"
-WHITE = "\033[37m"
+USE_COLOR = sys.stdout.isatty()
+
+if USE_COLOR:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    CYAN = "\033[36m"
+else:
+    RESET = BOLD = DIM = GREEN = YELLOW = RED = CYAN = ""
 
 
 def ws_frame(data):
@@ -69,8 +73,7 @@ def recv_frame(sock):
 
 
 def send_json(sock, obj):
-    payload = json.dumps(obj, separators=(",", ":"))
-    sock.sendall(ws_frame(payload))
+    sock.sendall(ws_frame(json.dumps(obj, separators=(",", ":"))))
 
 
 def recv_json(sock):
@@ -81,7 +84,6 @@ def recv_json(sock):
             return json.loads(data.decode())
 
         if opcode == 0x9:
-            # WebSocket ping -> pong
             n = len(data)
             if n < 126:
                 sock.sendall(bytes([0x8A, n]) + data)
@@ -145,10 +147,7 @@ def print_window(title, window):
     remaining = max(0, 100 - used)
 
     print(f"{BOLD}{title}{RESET}")
-    print(
-        f"  {progress_bar(used)}  "
-        f"{BOLD}{used}%{RESET} used"
-    )
+    print(f"  {progress_bar(used)}  {BOLD}{used}%{RESET} used")
     print(f"  Remaining: {GREEN}{remaining}%{RESET}")
     print(f"  Window:    {format_window(window.get('windowDurationMins'))}")
     print(f"  Resets:    {format_reset(window.get('resetsAt'))}")
@@ -156,9 +155,7 @@ def print_window(title, window):
 
 def main():
     if not os.path.exists(SOCK):
-        raise RuntimeError(
-            f"Codex control socket not found: {SOCK}"
-        )
+        raise RuntimeError(f"Codex control socket not found: {SOCK}")
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(10)
@@ -189,8 +186,8 @@ def main():
 
     if b" 101 " not in status and not status.endswith(b" 101"):
         raise RuntimeError(
-            "WebSocket upgrade failed: "
-            + status.decode(errors="replace")
+            "WebSocket upgrade failed: " +
+            status.decode(errors="replace")
         )
 
     send_json(sock, {
@@ -260,12 +257,13 @@ def main():
     credits = limits.get("credits")
 
     if credits:
-        print()
-        print(f"{BOLD}Credits{RESET}")
-
         if credits.get("unlimited"):
+            print()
+            print(f"{BOLD}Credits{RESET}")
             print(f"  Balance: {GREEN}unlimited{RESET}")
         elif credits.get("balance") is not None:
+            print()
+            print(f"{BOLD}Credits{RESET}")
             print(f"  Balance: {credits['balance']}")
 
     buckets = result.get("rateLimitsByLimitId")
