@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+# Codex limits in systemctl status style.
 # Flags: --color (force ANSI), --no-color (disable). By default colors are on
 # only when stdout is a terminal, so userbot/pipe output stays clean.
 
@@ -171,7 +172,7 @@ def format_window(minutes):
 def format_date(ts):
     if not ts:
         return "n/a"
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S UTC")
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
 
 
 def format_delta(ts):
@@ -191,13 +192,12 @@ def format_delta(ts):
 
 
 def level(pct):
-    """(color, systemd-like state) by usage percent."""
     if pct >= 100:
-        return RED, "failed (Result: quota-exhausted)"
+        return RED, "failed (quota-exhausted)"
     if pct >= 90:
-        return RED, "degraded (Result: quota-critical)"
+        return RED, "degraded (quota-critical)"
     if pct >= 70:
-        return YELLOW, "degraded (Result: quota-low)"
+        return YELLOW, "degraded (quota-low)"
     return GREEN, "active (running)"
 
 
@@ -254,10 +254,12 @@ def render(result):
         out.append(line("Memory:", "n/a"))
         out.append(line("CPU:", "n/a"))
 
-    out.append(line("CGroup:", "/codex.slice/codex-limits.service"))
+    out.append(line("CGroup:", "/codex.slice"))
 
     indent = " " * 13
-    width = max(10, max(len(n) for n, _ in items) + 1)
+
+    def short(name):
+        return name if len(name) <= 18 else name[:17] + "…"
 
     for idx, (name, win) in enumerate(items):
         last = idx == len(items) - 1
@@ -265,14 +267,14 @@ def render(result):
         cont = "   " if last else "│  "
 
         if not win:
-            out.append(f"{indent}{branch} {name:<{width}}n/a")
+            out.append(f"{indent}{branch} {short(name)} n/a")
             continue
 
         used = used_pct(win)
         ts = win.get("resetsAt")
-        out.append(f"{indent}{branch} {name:<{width}}{paint(pct_color(used), f'{used}%')}")
-        out.append(f"{indent}{cont}{'resets':<{width}}{format_date(ts)}")
-        out.append(f"{indent}{cont}{'in':<{width}}{format_delta(ts)}")
+        out.append(f"{indent}{branch} {short(name)} {paint(pct_color(used), f'{used}%')}")
+        out.append(f"{indent}{cont}{format_date(ts)}")
+        out.append(f"{indent}{cont}resets in {format_delta(ts)}")
 
     return "\n".join(out)
 
